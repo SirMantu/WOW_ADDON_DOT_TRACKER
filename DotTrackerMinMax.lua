@@ -8,6 +8,8 @@ local SKULL_SIZE = 32
 local BAR_COLOR = { 0, 0, 0, 0.85 }              -- r, g, b, alpha of the damage segment (black)
 local BOLD_FONT = (GameFontNormalLarge:GetFont()) -- default font of your client
 local BOLD_SIZE = 20
+local TEXT_OFFSET_X = -50                         -- text and skull: negative = left, positive = right of the nameplate center
+local TEXT_OFFSET_Y = 4                           -- text and skull: positive = up, negative = down
 local CRIT_MULTIPLIER = 1.5                      -- placeholder: adjust to the crit damage multiplier of Forever
 
 local DEFAULTS = {
@@ -17,6 +19,10 @@ local DEFAULTS = {
     includeCrit = false,   -- add expected crit damage to the prediction
     trackOthers = true,    -- also count DoTs cast by other players
     onlyAttacked = false,  -- only show enemies you (or your pet) attacked
+    textOffsetX = TEXT_OFFSET_X,   -- text and skull position, adjustable with the sliders
+    textOffsetY = TEXT_OFFSET_Y,
+    textSize = BOLD_SIZE,          -- font size of the text, adjustable with the sliders
+    skullSize = SKULL_SIZE,        -- size of the skull icon
     minimapAngle = 215,
 }
 
@@ -81,7 +87,7 @@ frame:SetPoint("CENTER", 0, -150)
 
 local fallbackText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 fallbackText:SetFont(BOLD_FONT, BOLD_SIZE, "THICKOUTLINE")
-fallbackText:SetPoint("CENTER")
+fallbackText:SetPoint("CENTER", TEXT_OFFSET_X, TEXT_OFFSET_Y)
 
 local fallbackSkull = frame:CreateTexture(nil, "OVERLAY")
 fallbackSkull:SetTexture(SKULL_TEXTURE)
@@ -91,22 +97,49 @@ fallbackSkull:Hide()
 
 -- ===== Text and skull on nameplates =====
 local plateWidgets = {}
+local function TextOffsets()
+    local db = DotTrackerDB
+    return (db and db.textOffsetX) or TEXT_OFFSET_X, (db and db.textOffsetY) or TEXT_OFFSET_Y
+end
+
+local function Sizes()
+    local db = DotTrackerDB
+    return (db and db.textSize) or BOLD_SIZE, (db and db.skullSize) or SKULL_SIZE
+end
+
 local function GetPlateWidgets(plate)
     local w = plateWidgets[plate]
     if not w then
+        local textSize, skullSize = Sizes()
         local holder = CreateFrame("Frame", nil, plate)
         local fs = holder:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        fs:SetFont(BOLD_FONT, BOLD_SIZE, "THICKOUTLINE")
-        fs:SetPoint("BOTTOM", plate, "TOP", 0, 4)
+        fs:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
+        fs:SetPoint("BOTTOM", plate, "TOP", TextOffsets())
         local skull = holder:CreateTexture(nil, "OVERLAY")
         skull:SetTexture(SKULL_TEXTURE)
-        skull:SetSize(SKULL_SIZE, SKULL_SIZE)
+        skull:SetSize(skullSize, skullSize)
         skull:SetPoint("BOTTOM", fs, "TOP", 0, 2)
         skull:Hide()
         w = { fs = fs, skull = skull }
         plateWidgets[plate] = w
     end
     return w
+end
+
+-- Re-anchors and resizes the text and skull on all nameplates and the fallback display
+local function ApplyLayout()
+    local x, y = TextOffsets()
+    local textSize, skullSize = Sizes()
+    fallbackText:ClearAllPoints()
+    fallbackText:SetPoint("CENTER", x, y)
+    fallbackText:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
+    fallbackSkull:SetSize(skullSize, skullSize)
+    for plate, w in pairs(plateWidgets) do
+        w.fs:ClearAllPoints()
+        w.fs:SetPoint("BOTTOM", plate, "TOP", x, y)
+        w.fs:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
+        w.skull:SetSize(skullSize, skullSize)
+    end
 end
 
 -- ===== Damage segment on the health bar =====
@@ -381,10 +414,17 @@ local OPTIONS = {
     { key = "onlyAttacked", label = "Only enemies I attacked" },
 }
 
+local SLIDERS = {
+    { key = "textOffsetX", label = "Text/skull horizontal offset (left <-> right)", min = -200, max = 200 },
+    { key = "textOffsetY", label = "Text/skull vertical offset (down <-> up)",      min = -100, max = 100 },
+    { key = "textSize",    label = "Text size",                                     min = 8,    max = 48 },
+    { key = "skullSize",   label = "Skull size",                                    min = 8,    max = 96 },
+}
+
 local function BuildOptionsPanel()
     local panel = CreateFrame("Frame", "DotTrackerOptions", UIParent,
         BackdropTemplateMixin and "BackdropTemplate" or nil)
-    panel:SetSize(360, 60 + #OPTIONS * 28)
+    panel:SetSize(360, 100 + #OPTIONS * 28 + #SLIDERS * 50)
     panel:SetPoint("CENTER")
     panel:SetFrameStrata("DIALOG")
     panel:SetBackdrop({
@@ -419,6 +459,34 @@ local function BuildOptionsPanel()
             Update()
         end)
     end
+
+    for i, s in ipairs(SLIDERS) do
+        local name = "DotTrackerSlider" .. i
+        local sl = CreateFrame("Slider", name, panel, "OptionsSliderTemplate")
+        sl:SetPoint("TOPLEFT", 30, -45 - #OPTIONS * 28 - 25 - (i - 1) * 50)
+        sl:SetWidth(300)
+        sl:SetMinMaxValues(s.min, s.max)
+        sl:SetValueStep(1)
+        if sl.SetObeyStepOnDrag then sl:SetObeyStepOnDrag(true) end
+        _G[name .. "Low"]:SetText(s.min)
+        _G[name .. "High"]:SetText(s.max)
+        local function SetLabel(v) _G[name .. "Text"]:SetText(s.label .. ": " .. v) end
+        sl:SetValue(DotTrackerDB[s.key])
+        SetLabel(DotTrackerDB[s.key])
+        sl:SetScript("OnValueChanged", function(self, value)
+            value = math.floor(value + 0.5)
+            DotTrackerDB[s.key] = value
+            SetLabel(value)
+            ApplyLayout()
+        end)
+    end
+
+    -- same as /dt test: fake DoTs on your target (removed after STALE_SECONDS)
+    local testBtn = CreateFrame("Button", "DotTrackerTestButton", panel, "UIPanelButtonTemplate")
+    testBtn:SetSize(200, 24)
+    testBtn:SetPoint("BOTTOM", 0, 22)
+    testBtn:SetText("Test (fake DoTs on target)")
+    testBtn:SetScript("OnClick", RunTest)
 
     tinsert(UISpecialFrames, "DotTrackerOptions")   -- ESC closes the window
     return panel
@@ -495,7 +563,7 @@ frame:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 
 frame:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" then
-        if arg1 == ADDON_NAME then InitDB() end
+        if arg1 == ADDON_NAME then InitDB(); ApplyLayout() end
         return
     elseif event == "PLAYER_LOGIN" then
         playerGUID = UnitGUID("player")

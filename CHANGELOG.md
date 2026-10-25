@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2
+
+### Added
+- Four sliders in the options window: horizontal and vertical offset of the text and skull, text size and skull size. Values are saved.
+- "Test" button in the options window, same as `/dt test` (adds fake DoTs to your target for 30 seconds).
+
+### Changed
+- Default position of the text and skull moved to the left so they no longer overlap the floating damage text.
+
+### Documentation
+- README describes the sliders and the test button.
+
 ## 1.0.1
 
 ### Added
