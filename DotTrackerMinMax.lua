@@ -15,6 +15,8 @@ local DEFAULTS = {
     showSkull = true,
     showBar = true,
     includeCrit = false,   -- add expected crit damage to the prediction
+    trackOthers = true,    -- also count DoTs cast by other players
+    onlyAttacked = false,  -- only show enemies you (or your pet) attacked
     minimapAngle = 215,
 }
 
@@ -23,6 +25,8 @@ local optionsPanel
 local DOT_INFO = {}        -- by localized spell name
 local dots = {}            -- dots[targetGUID][spellName] = { base, tick, ticks, total, last, school, lastCrit, crits }
 DT_dots = dots             -- for /dump DT_dots
+local attacked = {}        -- attacked[targetGUID] = time you (or your pet) last attacked it
+local ATTACKED_SECONDS = 300 -- forget enemies you have not attacked for this long
 
 local function InitDB()
     DotTrackerDB = DotTrackerDB or {}
@@ -137,10 +141,48 @@ local function ShowDamageOnBar(plate, hp, maxHP, total)
 end
 
 -- ===== DoT data =====
-local function Register(id, interval, fallbackDuration)
-    local name = GetSpellInfo(id)
-    if name then
-        DOT_INFO[name] = { interval = interval, duration = fallbackDuration }
+-- Lookup of all Classic DoTs: { spellId (any rank), English fallback name, tick interval, base duration }
+-- Durations are the base values of the highest rank WITHOUT talents. Lower ranks and
+-- talents (e.g. Improved Corruption, Improved Rend) change the real duration; for your own
+-- DoTs the real duration is read from the aura when possible.
+-- Combo point DoTs (Rupture, Rip) use a middle value because the combo points are not in the log.
+local DOT_LOOKUP = {
+    -- Warlock
+    { 172,   "Corruption",       3, 12 },
+    { 980,   "Curse of Agony",   2, 24 },
+    { 348,   "Immolate",         3, 15 },
+    { 18265, "Siphon Life",      3, 30 },
+    -- Warrior
+    { 772,   "Rend",             3, 21 },
+    { 12162, "Deep Wounds",      3, 12 },
+    -- Rogue
+    { 703,   "Garrote",          3, 18 },
+    { 1943,  "Rupture",          2, 12 },
+    { 2818,  "Deadly Poison",    3, 12 },
+    -- Hunter
+    { 1978,  "Serpent Sting",    3, 15 },
+    { 13795, "Immolation Trap",  3, 15 },
+    -- Druid
+    { 1822,  "Rake",             3, 9 },
+    { 1079,  "Rip",              2, 12 },
+    { 8921,  "Moonfire",         3, 12 },
+    { 9007,  "Pounce Bleed",     3, 18 },
+    -- Priest
+    { 589,   "Shadow Word: Pain", 3, 18 },
+    { 2944,  "Devouring Plague", 3, 24 },
+    { 14914, "Holy Fire",        2, 10 },
+    -- Mage
+    { 133,   "Fireball",         2, 8 },
+    { 11366, "Pyroblast",        3, 12 },
+    { 2120,  "Flamestrike",      2, 8 },
+    -- Shaman
+    { 8050,  "Flame Shock",      3, 12 },
+}
+
+local function RegisterAll()
+    for _, d in ipairs(DOT_LOOKUP) do
+        local name = GetSpellInfo(d[1]) or d[2]
+        DOT_INFO[name] = { interval = d[3], duration = d[4] }
     end
 end
 
@@ -176,7 +218,8 @@ end
 -- Damage per remaining tick for one DoT entry (never extrapolates from a crit tick)
 local function PerTick(e)
     local perTick = e.base or e.tick or 0
-    if DotTrackerDB and DotTrackerDB.includeCrit then
+    -- crit chance is only known for your own spells
+    if DotTrackerDB and DotTrackerDB.includeCrit and e.mine ~= false then
         perTick = perTick * (1 + SpellCritChance(e.school) * (CRIT_MULTIPLIER - 1))
     end
     return perTick
@@ -186,6 +229,7 @@ end
 local function Summary(guid, hp)
     local d = dots[guid]
     if not d or not hp then return nil end
+    if DotTrackerDB and DotTrackerDB.onlyAttacked and not attacked[guid] then return nil end
     local total, n = 0, 0
     for _, e in pairs(d) do
         total = total + math.max(e.total - e.ticks, 0) * PerTick(e)
@@ -211,6 +255,9 @@ local function Prune()
             if now - e.last > STALE_SECONDS then d[name] = nil end
         end
         if next(d) == nil then dots[guid] = nil end
+    end
+    for guid, t in pairs(attacked) do
+        if now - t > ATTACKED_SECONDS then attacked[guid] = nil end
     end
 end
 
@@ -264,23 +311,37 @@ local function OnCombatLog()
 
     if subevent == "UNIT_DIED" then
         dots[destGUID] = nil
+        attacked[destGUID] = nil
         return
     end
-    if sourceGUID ~= playerGUID then return end
 
+    -- remember every enemy you (or your pet) hit or tried to hit
+    if sourceGUID and destGUID and (sourceGUID == playerGUID or sourceGUID == UnitGUID("pet"))
+        and destGUID ~= playerGUID
+        and (subevent:find("_DAMAGE$") or subevent:find("_MISSED$") or subevent == "SPELL_AURA_APPLIED") then
+        attacked[destGUID] = GetTime()
+    end
     local info = DOT_INFO[spellName]
-    if not info then return end
-    if debug then print("CLEU:", subevent, spellName, amount, "crit:", critical) end
+    if not info or not sourceGUID then return end
+    local mine = sourceGUID == playerGUID
+    if not mine and not (DotTrackerDB and DotTrackerDB.trackOthers) then return end
+    if debug then print("CLEU:", subevent, sourceGUID, spellName, amount, "crit:", critical) end
+
+    -- one entry per caster, all of them are summed up in Summary()
+    local key = mine and spellName or (sourceGUID .. ":" .. spellName)
+    local function Duration()
+        return (mine and AuraDuration(destGUID, spellName)) or info.duration
+    end
 
     if subevent == "SPELL_AURA_APPLIED" or subevent == "SPELL_AURA_REMOVED" then
         -- new application or expired: start over
-        if dots[destGUID] then dots[destGUID][spellName] = nil end
+        if dots[destGUID] then dots[destGUID][key] = nil end
 
     elseif subevent == "SPELL_AURA_REFRESH" or subevent == "SPELL_AURA_REFRESHED" then
         -- recast while active: full duration again, keep last known tick damage
-        local e = dots[destGUID] and dots[destGUID][spellName]
+        local e = dots[destGUID] and dots[destGUID][key]
         if e then
-            local duration = AuraDuration(destGUID, spellName) or info.duration
+            local duration = Duration()
             e.ticks = 0
             e.total = math.max(1, math.floor(duration / info.interval + 0.5))
             e.last = GetTime()
@@ -288,11 +349,11 @@ local function OnCombatLog()
 
     elseif subevent == "SPELL_PERIODIC_DAMAGE" then
         dots[destGUID] = dots[destGUID] or {}
-        local e = dots[destGUID][spellName]
+        local e = dots[destGUID][key]
         if not e then
-            local duration = AuraDuration(destGUID, spellName) or info.duration
-            e = { ticks = 0, total = math.max(1, math.floor(duration / info.interval + 0.5)) }
-            dots[destGUID][spellName] = e
+            local duration = Duration()
+            e = { ticks = 0, mine = mine, total = math.max(1, math.floor(duration / info.interval + 0.5)) }
+            dots[destGUID][key] = e
         end
         e.ticks = e.ticks + 1
         e.tick = amount
@@ -316,6 +377,8 @@ local OPTIONS = {
     { key = "showSkull",   label = "Show skull icon when DoTs are lethal" },
     { key = "showBar",     label = "Show DoT damage on health bar" },
     { key = "includeCrit", label = "Include expected crit damage (DoT crits)" },
+    { key = "trackOthers", label = "Track DoTs of other players (summed up)" },
+    { key = "onlyAttacked", label = "Only enemies I attacked" },
 }
 
 local function BuildOptionsPanel()
@@ -436,10 +499,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
         return
     elseif event == "PLAYER_LOGIN" then
         playerGUID = UnitGUID("player")
-        Register(172, 3, 12)     -- Corruption
-        Register(980, 2, 24)     -- Curse of Agony
-        Register(348, 3, 15)     -- Immolate (DoT part)
-        Register(18265, 3, 30)   -- Siphon Life
+        RegisterAll()
         optionsPanel = BuildOptionsPanel()
         BuildMinimapButton()
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
