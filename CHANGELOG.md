@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.3
+
+### Fixed
+- Mind control: the Lua taint error "Frame:GetScaledRect(): Can't measure restricted regions" (blamed on DotTrackerMinMax) no longer appears when a DoT-affected enemy is mind controlled and changes faction. The text, skull and health bar segment are no longer created as children of Blizzard's nameplate frames. They live on `UIParent` and are only anchored to the nameplate. The health bar width is read with `pcall`, so a restricted bar is skipped instead of causing an error.
+- Mind control: a mind controlled enemy is friendly and is no longer shown. Its DoT data is kept, so the display returns when it turns hostile again.
+- Mind control: a mind controlled or possessed unit in the pet slot no longer counts as your pet for "Only enemies I attacked". Its attacks, and attacks on it, no longer mark enemies as attacked.
+
 ## 1.0.2
 
 ### Added
@@ -8,6 +15,7 @@
 
 ### Changed
 - Default position of the text and skull moved to the left so they no longer overlap the floating damage text.
+- The login message is gone. Instead, one chat hint per session appears the first time a DoT is tracked while enemy nameplates are off, naming your actual key binding for "Display Enemy Nameplates".
 
 ### Documentation
 - README describes the sliders and the test button.
@@ -17,7 +25,7 @@
 ### Added
 - Track DoTs cast by other players on enemies (option "Track DoTs of other players", on by default). Each caster is tracked separately and all damage is summed into one value.
 - Lookup table `DOT_LOOKUP` with 22 Classic DoTs (Warlock, Warrior, Rogue, Hunter, Druid, Priest, Mage, Shaman), using base durations without talents.
-- Option "Only enemies I attacked" (off by default): only shows enemies that you or your pet have attacked.
+- Option "Track only enemies I attacked" (off by default): only shows enemies that you or your pet have attacked.
 
 ### Documentation
 - README lists talents, ranks and combo points that can make the estimated tick count wrong (for example Improved Shadow Word: Pain).

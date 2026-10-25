@@ -1,5 +1,4 @@
 local ADDON_NAME = ...
-print("DotTracker loaded, this Addon will only work if healhbars of enemies are activated.")
 
 -- ===== Settings =====
 local STALE_SECONDS = 30                         -- discard DoT data without ticks
@@ -8,6 +7,8 @@ local SKULL_SIZE = 32
 local BAR_COLOR = { 0, 0, 0, 0.85 }              -- r, g, b, alpha of the damage segment (black)
 local BOLD_FONT = (GameFontNormalLarge:GetFont()) -- default font of your client
 local BOLD_SIZE = 20
+local TEXT_OFFSET_X = -50                         -- text and skull: negative = left, positive = right of the nameplate center
+local TEXT_OFFSET_Y = 4                           -- text and skull: positive = up, negative = down
 local CRIT_MULTIPLIER = 1.5                      -- placeholder: adjust to the crit damage multiplier of Forever
 
 local DEFAULTS = {
@@ -15,6 +16,12 @@ local DEFAULTS = {
     showSkull = true,
     showBar = true,
     includeCrit = false,   -- add expected crit damage to the prediction
+    trackOthers = true,    -- also count DoTs cast by other players
+    onlyAttacked = false,  -- only show enemies you (or your pet) attacked
+    textOffsetX = TEXT_OFFSET_X,   -- text and skull position, adjustable with the sliders
+    textOffsetY = TEXT_OFFSET_Y,
+    textSize = BOLD_SIZE,          -- font size of the text, adjustable with the sliders
+    skullSize = SKULL_SIZE,        -- size of the skull icon
     minimapAngle = 215,
 }
 
@@ -23,6 +30,8 @@ local optionsPanel
 local DOT_INFO = {}        -- by localized spell name
 local dots = {}            -- dots[targetGUID][spellName] = { base, tick, ticks, total, last, school, lastCrit, crits }
 DT_dots = dots             -- for /dump DT_dots
+local attacked = {}        -- attacked[targetGUID] = time you (or your pet) last attacked it
+local ATTACKED_SECONDS = 300 -- forget enemies you have not attacked for this long
 
 local function InitDB()
     DotTrackerDB = DotTrackerDB or {}
@@ -77,7 +86,7 @@ frame:SetPoint("CENTER", 0, -150)
 
 local fallbackText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 fallbackText:SetFont(BOLD_FONT, BOLD_SIZE, "THICKOUTLINE")
-fallbackText:SetPoint("CENTER")
+fallbackText:SetPoint("CENTER", TEXT_OFFSET_X, TEXT_OFFSET_Y)
 
 local fallbackSkull = frame:CreateTexture(nil, "OVERLAY")
 fallbackSkull:SetTexture(SKULL_TEXTURE)
@@ -87,22 +96,49 @@ fallbackSkull:Hide()
 
 -- ===== Text and skull on nameplates =====
 local plateWidgets = {}
+local function TextOffsets()
+    local db = DotTrackerDB
+    return (db and db.textOffsetX) or TEXT_OFFSET_X, (db and db.textOffsetY) or TEXT_OFFSET_Y
+end
+
+local function Sizes()
+    local db = DotTrackerDB
+    return (db and db.textSize) or BOLD_SIZE, (db and db.skullSize) or SKULL_SIZE
+end
+
 local function GetPlateWidgets(plate)
     local w = plateWidgets[plate]
     if not w then
+        local textSize, skullSize = Sizes()
         local holder = CreateFrame("Frame", nil, plate)
         local fs = holder:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        fs:SetFont(BOLD_FONT, BOLD_SIZE, "THICKOUTLINE")
-        fs:SetPoint("BOTTOM", plate, "TOP", 0, 4)
+        fs:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
+        fs:SetPoint("BOTTOM", plate, "TOP", TextOffsets())
         local skull = holder:CreateTexture(nil, "OVERLAY")
         skull:SetTexture(SKULL_TEXTURE)
-        skull:SetSize(SKULL_SIZE, SKULL_SIZE)
+        skull:SetSize(skullSize, skullSize)
         skull:SetPoint("BOTTOM", fs, "TOP", 0, 2)
         skull:Hide()
         w = { fs = fs, skull = skull }
         plateWidgets[plate] = w
     end
     return w
+end
+
+-- Re-anchors and resizes the text and skull on all nameplates and the fallback display
+local function ApplyLayout()
+    local x, y = TextOffsets()
+    local textSize, skullSize = Sizes()
+    fallbackText:ClearAllPoints()
+    fallbackText:SetPoint("CENTER", x, y)
+    fallbackText:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
+    fallbackSkull:SetSize(skullSize, skullSize)
+    for plate, w in pairs(plateWidgets) do
+        w.fs:ClearAllPoints()
+        w.fs:SetPoint("BOTTOM", plate, "TOP", x, y)
+        w.fs:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
+        w.skull:SetSize(skullSize, skullSize)
+    end
 end
 
 -- ===== Damage segment on the health bar =====
@@ -137,10 +173,48 @@ local function ShowDamageOnBar(plate, hp, maxHP, total)
 end
 
 -- ===== DoT data =====
-local function Register(id, interval, fallbackDuration)
-    local name = GetSpellInfo(id)
-    if name then
-        DOT_INFO[name] = { interval = interval, duration = fallbackDuration }
+-- Lookup of all Classic DoTs: { spellId (any rank), English fallback name, tick interval, base duration }
+-- Durations are the base values of the highest rank WITHOUT talents. Lower ranks and
+-- talents (e.g. Improved Corruption, Improved Rend) change the real duration; for your own
+-- DoTs the real duration is read from the aura when possible.
+-- Combo point DoTs (Rupture, Rip) use a middle value because the combo points are not in the log.
+local DOT_LOOKUP = {
+    -- Warlock
+    { 172,   "Corruption",       3, 12 },
+    { 980,   "Curse of Agony",   2, 24 },
+    { 348,   "Immolate",         3, 15 },
+    { 18265, "Siphon Life",      3, 30 },
+    -- Warrior
+    { 772,   "Rend",             3, 21 },
+    { 12162, "Deep Wounds",      3, 12 },
+    -- Rogue
+    { 703,   "Garrote",          3, 18 },
+    { 1943,  "Rupture",          2, 12 },
+    { 2818,  "Deadly Poison",    3, 12 },
+    -- Hunter
+    { 1978,  "Serpent Sting",    3, 15 },
+    { 13795, "Immolation Trap",  3, 15 },
+    -- Druid
+    { 1822,  "Rake",             3, 9 },
+    { 1079,  "Rip",              2, 12 },
+    { 8921,  "Moonfire",         3, 12 },
+    { 9007,  "Pounce Bleed",     3, 18 },
+    -- Priest
+    { 589,   "Shadow Word: Pain", 3, 18 },
+    { 2944,  "Devouring Plague", 3, 24 },
+    { 14914, "Holy Fire",        2, 10 },
+    -- Mage
+    { 133,   "Fireball",         2, 8 },
+    { 11366, "Pyroblast",        3, 12 },
+    { 2120,  "Flamestrike",      2, 8 },
+    -- Shaman
+    { 8050,  "Flame Shock",      3, 12 },
+}
+
+local function RegisterAll()
+    for _, d in ipairs(DOT_LOOKUP) do
+        local name = GetSpellInfo(d[1]) or d[2]
+        DOT_INFO[name] = { interval = d[3], duration = d[4] }
     end
 end
 
@@ -176,7 +250,8 @@ end
 -- Damage per remaining tick for one DoT entry (never extrapolates from a crit tick)
 local function PerTick(e)
     local perTick = e.base or e.tick or 0
-    if DotTrackerDB and DotTrackerDB.includeCrit then
+    -- crit chance is only known for your own spells
+    if DotTrackerDB and DotTrackerDB.includeCrit and e.mine ~= false then
         perTick = perTick * (1 + SpellCritChance(e.school) * (CRIT_MULTIPLIER - 1))
     end
     return perTick
@@ -186,6 +261,7 @@ end
 local function Summary(guid, hp)
     local d = dots[guid]
     if not d or not hp then return nil end
+    if DotTrackerDB and DotTrackerDB.onlyAttacked and not attacked[guid] then return nil end
     local total, n = 0, 0
     for _, e in pairs(d) do
         total = total + math.max(e.total - e.ticks, 0) * PerTick(e)
@@ -211,6 +287,9 @@ local function Prune()
             if now - e.last > STALE_SECONDS then d[name] = nil end
         end
         if next(d) == nil then dots[guid] = nil end
+    end
+    for guid, t in pairs(attacked) do
+        if now - t > ATTACKED_SECONDS then attacked[guid] = nil end
     end
 end
 
@@ -258,29 +337,53 @@ local function Update()
 end
 
 -- ===== Combat log =====
+-- One hint per session, only when a DoT is tracked while enemy nameplates are off
+local nameplateHintShown = false
+local function HintIfNameplatesOff()
+    if nameplateHintShown or GetCVar("nameplateShowEnemies") == "1" then return end
+    nameplateHintShown = true
+    local key = GetBindingKey("NAMEPLATES")
+    print("DotTracker: enemy nameplates are off, so only your target's text is shown. Press "
+        .. (key and GetBindingText(key) or "the 'Display Enemy Nameplates' key") .. " to enable them.")
+end
+
 local function OnCombatLog()
     local _, subevent, _, sourceGUID, _, _, _, destGUID, _, _, _, _, spellName, _, amount,
           _, school, _, _, _, critical = CombatLogGetCurrentEventInfo()
 
     if subevent == "UNIT_DIED" then
         dots[destGUID] = nil
+        attacked[destGUID] = nil
         return
     end
-    if sourceGUID ~= playerGUID then return end
 
+    -- remember every enemy you (or your pet) hit or tried to hit
+    if sourceGUID and destGUID and (sourceGUID == playerGUID or sourceGUID == UnitGUID("pet"))
+        and destGUID ~= playerGUID
+        and (subevent:find("_DAMAGE$") or subevent:find("_MISSED$") or subevent == "SPELL_AURA_APPLIED") then
+        attacked[destGUID] = GetTime()
+    end
     local info = DOT_INFO[spellName]
-    if not info then return end
-    if debug then print("CLEU:", subevent, spellName, amount, "crit:", critical) end
+    if not info or not sourceGUID then return end
+    local mine = sourceGUID == playerGUID
+    if not mine and not (DotTrackerDB and DotTrackerDB.trackOthers) then return end
+    if debug then print("CLEU:", subevent, sourceGUID, spellName, amount, "crit:", critical) end
+
+    -- one entry per caster, all of them are summed up in Summary()
+    local key = mine and spellName or (sourceGUID .. ":" .. spellName)
+    local function Duration()
+        return (mine and AuraDuration(destGUID, spellName)) or info.duration
+    end
 
     if subevent == "SPELL_AURA_APPLIED" or subevent == "SPELL_AURA_REMOVED" then
         -- new application or expired: start over
-        if dots[destGUID] then dots[destGUID][spellName] = nil end
+        if dots[destGUID] then dots[destGUID][key] = nil end
 
     elseif subevent == "SPELL_AURA_REFRESH" or subevent == "SPELL_AURA_REFRESHED" then
         -- recast while active: full duration again, keep last known tick damage
-        local e = dots[destGUID] and dots[destGUID][spellName]
+        local e = dots[destGUID] and dots[destGUID][key]
         if e then
-            local duration = AuraDuration(destGUID, spellName) or info.duration
+            local duration = Duration()
             e.ticks = 0
             e.total = math.max(1, math.floor(duration / info.interval + 0.5))
             e.last = GetTime()
@@ -288,11 +391,12 @@ local function OnCombatLog()
 
     elseif subevent == "SPELL_PERIODIC_DAMAGE" then
         dots[destGUID] = dots[destGUID] or {}
-        local e = dots[destGUID][spellName]
+        local e = dots[destGUID][key]
         if not e then
-            local duration = AuraDuration(destGUID, spellName) or info.duration
-            e = { ticks = 0, total = math.max(1, math.floor(duration / info.interval + 0.5)) }
-            dots[destGUID][spellName] = e
+            local duration = Duration()
+            e = { ticks = 0, mine = mine, total = math.max(1, math.floor(duration / info.interval + 0.5)) }
+            dots[destGUID][key] = e
+            if mine or destGUID == UnitGUID("target") then HintIfNameplatesOff() end
         end
         e.ticks = e.ticks + 1
         e.tick = amount
@@ -316,12 +420,21 @@ local OPTIONS = {
     { key = "showSkull",   label = "Show skull icon when DoTs are lethal" },
     { key = "showBar",     label = "Show DoT damage on health bar" },
     { key = "includeCrit", label = "Include expected crit damage (DoT crits)" },
+    { key = "trackOthers", label = "Track DoTs of other players (summed up)" },
+    { key = "onlyAttacked", label = "Track only enemies I attacked" },
+}
+
+local SLIDERS = {
+    { key = "textOffsetX", label = "Text/skull horizontal offset (left <-> right)", min = -200, max = 200 },
+    { key = "textOffsetY", label = "Text/skull vertical offset (down <-> up)",      min = -100, max = 100 },
+    { key = "textSize",    label = "Text size",                                     min = 8,    max = 48 },
+    { key = "skullSize",   label = "Skull size",                                    min = 8,    max = 96 },
 }
 
 local function BuildOptionsPanel()
     local panel = CreateFrame("Frame", "DotTrackerOptions", UIParent,
         BackdropTemplateMixin and "BackdropTemplate" or nil)
-    panel:SetSize(360, 60 + #OPTIONS * 28)
+    panel:SetSize(360, 100 + #OPTIONS * 28 + #SLIDERS * 50)
     panel:SetPoint("CENTER")
     panel:SetFrameStrata("DIALOG")
     panel:SetBackdrop({
@@ -356,6 +469,34 @@ local function BuildOptionsPanel()
             Update()
         end)
     end
+
+    for i, s in ipairs(SLIDERS) do
+        local name = "DotTrackerSlider" .. i
+        local sl = CreateFrame("Slider", name, panel, "OptionsSliderTemplate")
+        sl:SetPoint("TOPLEFT", 30, -45 - #OPTIONS * 28 - 25 - (i - 1) * 50)
+        sl:SetWidth(300)
+        sl:SetMinMaxValues(s.min, s.max)
+        sl:SetValueStep(1)
+        if sl.SetObeyStepOnDrag then sl:SetObeyStepOnDrag(true) end
+        _G[name .. "Low"]:SetText(s.min)
+        _G[name .. "High"]:SetText(s.max)
+        local function SetLabel(v) _G[name .. "Text"]:SetText(s.label .. ": " .. v) end
+        sl:SetValue(DotTrackerDB[s.key])
+        SetLabel(DotTrackerDB[s.key])
+        sl:SetScript("OnValueChanged", function(self, value)
+            value = math.floor(value + 0.5)
+            DotTrackerDB[s.key] = value
+            SetLabel(value)
+            ApplyLayout()
+        end)
+    end
+
+    -- same as /dt test: fake DoTs on your target (removed after STALE_SECONDS)
+    local testBtn = CreateFrame("Button", "DotTrackerTestButton", panel, "UIPanelButtonTemplate")
+    testBtn:SetSize(200, 24)
+    testBtn:SetPoint("BOTTOM", 0, 22)
+    testBtn:SetText("Test (fake DoTs on target)")
+    testBtn:SetScript("OnClick", RunTest)
 
     tinsert(UISpecialFrames, "DotTrackerOptions")   -- ESC closes the window
     return panel
@@ -432,14 +573,11 @@ frame:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 
 frame:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" then
-        if arg1 == ADDON_NAME then InitDB() end
+        if arg1 == ADDON_NAME then InitDB(); ApplyLayout() end
         return
     elseif event == "PLAYER_LOGIN" then
         playerGUID = UnitGUID("player")
-        Register(172, 3, 12)     -- Corruption
-        Register(980, 2, 24)     -- Curse of Agony
-        Register(348, 3, 15)     -- Immolate (DoT part)
-        Register(18265, 3, 30)   -- Siphon Life
+        RegisterAll()
         optionsPanel = BuildOptionsPanel()
         BuildMinimapButton()
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then

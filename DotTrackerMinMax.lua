@@ -1,5 +1,4 @@
 local ADDON_NAME = ...
-print("DotTracker loaded, this Addon will only work if healhbars of enemies are activated.")
 
 -- ===== Settings =====
 local STALE_SECONDS = 30                         -- discard DoT data without ticks
@@ -111,7 +110,11 @@ local function GetPlateWidgets(plate)
     local w = plateWidgets[plate]
     if not w then
         local textSize, skullSize = Sizes()
-        local holder = CreateFrame("Frame", nil, plate)
+        -- The holder is parented to UIParent, not to the nameplate. Nameplate regions cannot be
+        -- measured by addons in this client, so the text can only be anchored to the plate.
+        local holder = CreateFrame("Frame", nil, UIParent)
+        holder:SetFrameStrata("MEDIUM")
+        holder:SetFrameLevel(50)
         local fs = holder:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         fs:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
         fs:SetPoint("BOTTOM", plate, "TOP", TextOffsets())
@@ -143,34 +146,44 @@ local function ApplyLayout()
 end
 
 -- ===== Damage segment on the health bar =====
-local overlays = {}   -- overlays[healthBar] = texture
+-- overlays[healthBar] = { tex = texture }
+-- The texture lives on our own frame and is anchored to the fill texture of the health bar.
+local overlays = {}
+local overlayHost = CreateFrame("Frame", nil, UIParent)
+overlayHost:SetFrameStrata("MEDIUM")
+overlayHost:SetFrameLevel(49)
 local function GetOverlay(healthBar)
-    local t = overlays[healthBar]
-    if not t then
-        t = healthBar:CreateTexture(nil, "OVERLAY", nil, 2)
+    local o = overlays[healthBar]
+    if not o then
+        local t = overlayHost:CreateTexture(nil, "OVERLAY", nil, 2)
         t:SetColorTexture(BAR_COLOR[1], BAR_COLOR[2], BAR_COLOR[3], BAR_COLOR[4])
         t:Hide()
-        overlays[healthBar] = t
+        o = { tex = t }
+        overlays[healthBar] = o
     end
-    return t
+    return o
 end
 
 local function ShowDamageOnBar(plate, hp, maxHP, total)
     local uf = plate.UnitFrame or plate.unitFrame
     local healthBar = uf and uf.healthBar
     if not healthBar or not hp or not maxHP or maxHP <= 0 or maxHP == 100 then return end
+
     local fill = healthBar:GetStatusBarTexture()
     if not fill then return end
 
-    local width = healthBar:GetWidth() * math.min(total, hp) / maxHP
+    -- measuring can fail on restricted nameplate regions: skip the bar instead of erroring
+    local ok, barWidth = pcall(healthBar.GetWidth, healthBar)
+    if not ok or not barWidth then return end
+    local width = barWidth * math.min(total, hp) / maxHP
     if width < 1 then return end
 
-    local t = GetOverlay(healthBar)
-    t:ClearAllPoints()
-    t:SetPoint("TOPRIGHT", fill, "TOPRIGHT")
-    t:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT")
-    t:SetWidth(width)
-    t:Show()
+    local o = GetOverlay(healthBar)
+    o.tex:ClearAllPoints()
+    o.tex:SetPoint("TOPRIGHT", fill, "TOPRIGHT")
+    o.tex:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT")
+    o.tex:SetWidth(width)
+    o.tex:Show()
 end
 
 -- ===== DoT data =====
@@ -302,7 +315,9 @@ local function Update()
         w.fs:SetText("")
         w.skull:Hide()
     end
-    for _, t in pairs(overlays) do t:Hide() end
+    for _, o in pairs(overlays) do
+        o.tex:Hide()
+    end
     fallbackText:SetText("")
     fallbackSkull:Hide()
 
@@ -311,7 +326,9 @@ local function Update()
 
     for i = 1, 40 do
         local unit = "nameplate" .. i
-        if UnitExists(unit) then
+        -- friendly units (e.g. a mind controlled enemy) are not shown; their DoT data is kept
+        -- because the DoTs keep ticking and the enemy turns hostile again afterwards
+        if UnitExists(unit) and not UnitIsFriend("player", unit) then
             local guid = UnitGUID(unit)
             if guid and dots[guid] then
                 local hp, maxHP = UnitHealth(unit), UnitHealthMax(unit)
@@ -328,7 +345,7 @@ local function Update()
         end
     end
 
-    if targetGUID and not targetShown and dots[targetGUID] then
+    if targetGUID and not targetShown and dots[targetGUID] and not UnitIsFriend("player", "target") then
         local remaining, lethal = Summary(targetGUID, UnitHealth("target"))
         if remaining then
             if db.showText then fallbackText:SetText(FormatRemaining(remaining)) end
@@ -338,6 +355,16 @@ local function Update()
 end
 
 -- ===== Combat log =====
+-- One hint per session, only when a DoT is tracked while enemy nameplates are off
+local nameplateHintShown = false
+local function HintIfNameplatesOff()
+    if nameplateHintShown or GetCVar("nameplateShowEnemies") == "1" then return end
+    nameplateHintShown = true
+    local key = GetBindingKey("NAMEPLATES")
+    print("DotTracker: enemy nameplates are off, so only your target's text is shown. Press "
+        .. (key and GetBindingText(key) or "the 'Display Enemy Nameplates' key") .. " to enable them.")
+end
+
 local function OnCombatLog()
     local _, subevent, _, sourceGUID, _, _, _, destGUID, _, _, _, _, spellName, _, amount,
           _, school, _, _, _, critical = CombatLogGetCurrentEventInfo()
@@ -349,8 +376,12 @@ local function OnCombatLog()
     end
 
     -- remember every enemy you (or your pet) hit or tried to hit
-    if sourceGUID and destGUID and (sourceGUID == playerGUID or sourceGUID == UnitGUID("pet"))
-        and destGUID ~= playerGUID
+    -- a mind controlled / possessed unit sits in the pet slot but is not a real pet: its attacks
+    -- and the attacks on it do not count as "attacked by me"
+    local petGUID = UnitGUID("pet")
+    if petGUID and (UnitIsCharmed("pet") or UnitIsPossessed("pet")) then petGUID = nil end
+    if sourceGUID and destGUID and (sourceGUID == playerGUID or sourceGUID == petGUID)
+        and destGUID ~= playerGUID and destGUID ~= UnitGUID("pet")
         and (subevent:find("_DAMAGE$") or subevent:find("_MISSED$") or subevent == "SPELL_AURA_APPLIED") then
         attacked[destGUID] = GetTime()
     end
@@ -387,6 +418,7 @@ local function OnCombatLog()
             local duration = Duration()
             e = { ticks = 0, mine = mine, total = math.max(1, math.floor(duration / info.interval + 0.5)) }
             dots[destGUID][key] = e
+            if mine or destGUID == UnitGUID("target") then HintIfNameplatesOff() end
         end
         e.ticks = e.ticks + 1
         e.tick = amount
@@ -411,7 +443,7 @@ local OPTIONS = {
     { key = "showBar",     label = "Show DoT damage on health bar" },
     { key = "includeCrit", label = "Include expected crit damage (DoT crits)" },
     { key = "trackOthers", label = "Track DoTs of other players (summed up)" },
-    { key = "onlyAttacked", label = "Only enemies I attacked" },
+    { key = "onlyAttacked", label = "Track only enemies I attacked" },
 }
 
 local SLIDERS = {
