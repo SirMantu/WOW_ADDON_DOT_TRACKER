@@ -6,6 +6,7 @@ manual-changelog:
 
 ignore:
   - README.md
+  - release.py
   - feature_screenshot.jpg
   - feature_screenshot.psd
   - .vscode

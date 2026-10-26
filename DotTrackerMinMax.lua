@@ -4,7 +4,15 @@ local ADDON_NAME = ...
 local STALE_SECONDS = 30                         -- discard DoT data without ticks
 local SKULL_TEXTURE = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_8"
 local SKULL_SIZE = 32
-local BAR_COLOR = { 0, 0, 0, 0.85 }              -- r, g, b, alpha of the damage segment (black)
+-- Damage bar colors (r, g, b, alpha) depend on whether the DoTs kill the enemy:
+local BAR_COLOR_NONLETHAL = { 0.55, 0.2, 0.85, 0.9 } -- the enemy survives the DoTs: purple
+local BAR_COLOR_LETHAL = { 0, 0, 0, 0.9 }         -- 0 or less life left (the DoTs kill it): black
+local BAR_TICK_COLOR = { 1, 1, 1, 0.5 }           -- thin lines, one per tick still to come
+local BAR_EDGE_COLOR = { 1, 1, 1, 1 }             -- bright line on the left edge: where the enemy's life will end
+local BAR_GLASS_TOP_ALPHA = 0.35                  -- glass effect: white at the top ...
+local BAR_GLASS_BOTTOM_ALPHA = 0.35               -- ... black at the bottom
+local BAR_MAX_TICKS = 40                          -- tick lines drawn per bar at most
+local BAR_INSET = 2                              -- pixels kept free at the top and bottom (health bar border)
 local BOLD_FONT = (GameFontNormalLarge:GetFont()) -- default font of your client
 local BOLD_SIZE = 20
 local TEXT_OFFSET_X = -50                         -- text and skull: negative = left, positive = right of the nameplate center
@@ -22,6 +30,13 @@ local DEFAULTS = {
     textOffsetY = TEXT_OFFSET_Y,
     textSize = BOLD_SIZE,          -- font size of the text, adjustable with the sliders
     skullSize = SKULL_SIZE,        -- size of the skull icon
+    showTicks = true,      -- tick lines on the damage bar
+    showGlass = true,      -- glass effect (gradient) on the damage bar
+    showTimeToDeath = true, -- seconds until the DoTs kill the enemy, next to the skull
+    colorNonLethal = BAR_COLOR_NONLETHAL, -- colors of the damage bar, chosen with the color fields
+    colorLethal = BAR_COLOR_LETHAL,
+    tickColor = BAR_TICK_COLOR,
+    edgeColor = BAR_EDGE_COLOR,
     minimapAngle = 215,
 }
 
@@ -36,7 +51,10 @@ local ATTACKED_SECONDS = 300 -- forget enemies you have not attacked for this lo
 local function InitDB()
     DotTrackerDB = DotTrackerDB or {}
     for k, v in pairs(DEFAULTS) do
-        if DotTrackerDB[k] == nil then DotTrackerDB[k] = v end
+        if DotTrackerDB[k] == nil then
+            -- colors are tables: copy them so the saved value never changes the defaults
+            DotTrackerDB[k] = type(v) == "table" and { v[1], v[2], v[3], v[4] } or v
+        end
     end
 end
 
@@ -94,6 +112,11 @@ fallbackSkull:SetSize(SKULL_SIZE, SKULL_SIZE)
 fallbackSkull:SetPoint("BOTTOM", fallbackText, "TOP", 0, 2)
 fallbackSkull:Hide()
 
+-- seconds until death, to the right of the skull
+local fallbackTTD = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+fallbackTTD:SetFont(BOLD_FONT, math.floor(BOLD_SIZE * 0.8), "THICKOUTLINE")
+fallbackTTD:SetPoint("LEFT", fallbackSkull, "RIGHT", 4, 0)
+
 -- ===== Text and skull on nameplates =====
 local plateWidgets = {}
 local function TextOffsets()
@@ -123,7 +146,10 @@ local function GetPlateWidgets(plate)
         skull:SetSize(skullSize, skullSize)
         skull:SetPoint("BOTTOM", fs, "TOP", 0, 2)
         skull:Hide()
-        w = { fs = fs, skull = skull }
+        local ttd = holder:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        ttd:SetFont(BOLD_FONT, math.floor(textSize * 0.8), "THICKOUTLINE")
+        ttd:SetPoint("LEFT", skull, "RIGHT", 4, 0)
+        w = { fs = fs, skull = skull, ttd = ttd }
         plateWidgets[plate] = w
     end
     return w
@@ -137,53 +163,73 @@ local function ApplyLayout()
     fallbackText:SetPoint("CENTER", x, y)
     fallbackText:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
     fallbackSkull:SetSize(skullSize, skullSize)
+    fallbackTTD:SetFont(BOLD_FONT, math.floor(textSize * 0.8), "THICKOUTLINE")
     for plate, w in pairs(plateWidgets) do
         w.fs:ClearAllPoints()
         w.fs:SetPoint("BOTTOM", plate, "TOP", x, y)
         w.fs:SetFont(BOLD_FONT, textSize, "THICKOUTLINE")
+        w.ttd:SetFont(BOLD_FONT, math.floor(textSize * 0.8), "THICKOUTLINE")
         w.skull:SetSize(skullSize, skullSize)
     end
 end
 
 -- ===== Damage segment on the health bar =====
--- overlays[healthBar] = { tex = texture }
--- The texture lives on our own frame and is anchored to the fill texture of the health bar.
+-- overlays[healthBar] = { frame, base, glass, ticks = { textures }, edge }
+-- The frame lives on UIParent, is anchored to the fill texture of the health bar and clips its
+-- children to its own size.
 local overlays = {}
-local overlayHost = CreateFrame("Frame", nil, UIParent)
-overlayHost:SetFrameStrata("MEDIUM")
-overlayHost:SetFrameLevel(49)
+
+-- Color r, g, b, a chosen in the options (key in DotTrackerDB) or the default constant
+local function BarColor(key, default)
+    local c = DotTrackerDB and DotTrackerDB[key] or default
+    return c[1], c[2], c[3], c[4]
+end
+
+-- Vertical gradient: topAlpha of white at the top, bottomAlpha of black at the bottom
+local function SetGlass(tex, topAlpha, bottomAlpha)
+    tex:SetColorTexture(1, 1, 1, 1)
+    if tex.SetGradientAlpha then
+        tex:SetGradientAlpha("VERTICAL", 0, 0, 0, bottomAlpha, 1, 1, 1, topAlpha)
+    elseif tex.SetGradient and CreateColor then
+        tex:SetGradient("VERTICAL", CreateColor(0, 0, 0, bottomAlpha), CreateColor(1, 1, 1, topAlpha))
+    end
+end
+
 local function GetOverlay(healthBar)
     local o = overlays[healthBar]
     if not o then
-        local t = overlayHost:CreateTexture(nil, "OVERLAY", nil, 2)
-        t:SetColorTexture(BAR_COLOR[1], BAR_COLOR[2], BAR_COLOR[3], BAR_COLOR[4])
-        t:Hide()
-        o = { tex = t }
+        local f = CreateFrame("Frame", nil, UIParent)
+        f:SetFrameStrata("MEDIUM")
+        f:SetFrameLevel(49)
+        f:SetClipsChildren(true)
+        f:Hide()
+
+        local base = f:CreateTexture(nil, "ARTWORK")
+        base:SetAllPoints()
+
+        local glass = f:CreateTexture(nil, "ARTWORK", nil, 1)
+        glass:SetAllPoints()
+        SetGlass(glass, BAR_GLASS_TOP_ALPHA, BAR_GLASS_BOTTOM_ALPHA)
+
+        local edge = f:CreateTexture(nil, "OVERLAY", nil, 2)
+        edge:SetPoint("TOPLEFT", f, "TOPLEFT")
+        edge:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT")
+        edge:SetWidth(1)
+
+        o = { frame = f, base = base, glass = glass, ticks = {}, edge = edge }
         overlays[healthBar] = o
     end
     return o
 end
 
-local function ShowDamageOnBar(plate, hp, maxHP, total)
-    local uf = plate.UnitFrame or plate.unitFrame
-    local healthBar = uf and uf.healthBar
-    if not healthBar or not hp or not maxHP or maxHP <= 0 or maxHP == 100 then return end
-
-    local fill = healthBar:GetStatusBarTexture()
-    if not fill then return end
-
-    -- measuring can fail on restricted nameplate regions: skip the bar instead of erroring
-    local ok, barWidth = pcall(healthBar.GetWidth, healthBar)
-    if not ok or not barWidth then return end
-    local width = barWidth * math.min(total, hp) / maxHP
-    if width < 1 then return end
-
-    local o = GetOverlay(healthBar)
-    o.tex:ClearAllPoints()
-    o.tex:SetPoint("TOPRIGHT", fill, "TOPRIGHT")
-    o.tex:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT")
-    o.tex:SetWidth(width)
-    o.tex:Show()
+-- Tick line number i of an overlay (created when needed)
+local function GetTickLine(o, i)
+    local t = o.ticks[i]
+    if not t then
+        t = o.frame:CreateTexture(nil, "OVERLAY", nil, 1)
+        o.ticks[i] = t
+    end
+    return t
 end
 
 -- ===== DoT data =====
@@ -286,6 +332,107 @@ local function Summary(guid, hp)
     return hp - total, (hp > 0 and total >= hp), total
 end
 
+-- The ticks still to come, sorted by time: { { t = seconds from now, dmg = damage }, ... }
+-- The next tick of a DoT is expected one interval after its last tick.
+local function Schedule(guid)
+    local d = dots[guid]
+    if not d then return nil end
+    local now = GetTime()
+    local list = {}
+    for _, e in pairs(d) do
+        local interval = e.interval or 3
+        local perTick = PerTick(e)
+        for k = 1, math.max(e.total - e.ticks, 0) do
+            list[#list + 1] = { t = math.max(e.last + k * interval - now, 0), dmg = perTick }
+        end
+    end
+    table.sort(list, function(a, b) return a.t < b.t end)
+    return list
+end
+
+-- Seconds until the DoTs have dealt as much damage as the enemy has life, or nil
+local function TimeToDeath(guid, hp)
+    local list = Schedule(guid)
+    if not list or not hp then return nil end
+    local sum = 0
+    for _, s in ipairs(list) do
+        sum = sum + s.dmg
+        if sum >= hp - 0.5 then return s.t end
+    end
+end
+
+local function FormatTimeToDeath(t)
+    if not t then return "" end
+    return string.format("|cffffffff%d s|r", math.ceil(t))
+end
+
+-- Draws the DoT damage on the health bar: color by the life left, glass effect, tick lines
+local function ShowDamageOnBar(plate, guid, hp, maxHP, total, remaining)
+    local uf = plate.UnitFrame or plate.unitFrame
+    local healthBar = uf and uf.healthBar
+    if not healthBar or not hp or not maxHP or maxHP <= 0 or maxHP == 100 then return end
+
+    local fill = healthBar:GetStatusBarTexture()
+    if not fill then return end
+
+    -- measuring can fail on restricted nameplate regions: skip the bar instead of erroring
+    local ok, barWidth = pcall(healthBar.GetWidth, healthBar)
+    if not ok or not barWidth then return end
+    local width = barWidth * math.min(total, hp) / maxHP
+    if width < 1 then return end
+
+    local db = DotTrackerDB
+    local o = GetOverlay(healthBar)
+    -- Our frame is on UIParent but the nameplate has its own scale. Give the frame the same
+    -- effective scale as the health bar, so its width and lines match the bar exactly.
+    local okScale, barScale = pcall(healthBar.GetEffectiveScale, healthBar)
+    local uiScale = UIParent:GetEffectiveScale()
+    if okScale and barScale and uiScale and uiScale > 0 then
+        o.frame:SetScale(barScale / uiScale)
+    end
+    o.frame:ClearAllPoints()
+    o.frame:SetPoint("TOPRIGHT", fill, "TOPRIGHT", 0, -BAR_INSET)
+    o.frame:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT", 0, BAR_INSET)
+    o.frame:SetWidth(width)
+
+    -- two colors: the DoTs kill the enemy (0 or less life left) or it survives
+    if remaining <= 0 then
+        o.base:SetColorTexture(BarColor("colorLethal", BAR_COLOR_LETHAL))
+    else
+        o.base:SetColorTexture(BarColor("colorNonLethal", BAR_COLOR_NONLETHAL))
+    end
+    o.glass:SetShown(db.showGlass)
+    o.edge:SetColorTexture(BarColor("edgeColor", BAR_EDGE_COLOR))
+
+    -- one thin line per tick still to come, counted from the right edge of the filled part
+    local used = 0
+    if db.showTicks then
+        local list = Schedule(guid)
+        if list then
+            local cum, lastX = 0, 0
+            for _, s in ipairs(list) do
+                cum = cum + s.dmg
+                local x = barWidth * cum / maxHP
+                if x >= width - 1 or used >= BAR_MAX_TICKS then break end
+                if x - lastX >= 2 then
+                    used = used + 1
+                    local t = GetTickLine(o, used)
+                    t:SetColorTexture(BarColor("tickColor", BAR_TICK_COLOR))
+                    t:ClearAllPoints()
+                    t:SetPoint("TOPRIGHT", o.frame, "TOPRIGHT", -x, 0)
+                    t:SetPoint("BOTTOMRIGHT", o.frame, "BOTTOMRIGHT", -x, 0)
+                    t:SetWidth(1)
+                    t:Show()
+                    lastX = x
+                end
+            end
+        end
+    end
+    for i = used + 1, #o.ticks do o.ticks[i]:Hide() end
+
+    o.frame:Show()
+end
+
 -- Negative numbers (overkill) are shown in red
 local function FormatRemaining(n)
     if n < 0 then
@@ -314,12 +461,14 @@ local function Update()
     for _, w in pairs(plateWidgets) do
         w.fs:SetText("")
         w.skull:Hide()
+        w.ttd:SetText("")
     end
     for _, o in pairs(overlays) do
-        o.tex:Hide()
+        o.frame:Hide()
     end
     fallbackText:SetText("")
     fallbackSkull:Hide()
+    fallbackTTD:SetText("")
 
     local targetGUID = UnitGUID("target")
     local targetShown = false
@@ -338,7 +487,8 @@ local function Update()
                     local w = GetPlateWidgets(plate)
                     if db.showText then w.fs:SetText(FormatRemaining(remaining)) end
                     if db.showSkull and lethal then w.skull:Show() end
-                    if db.showBar then ShowDamageOnBar(plate, hp, maxHP, total) end
+                    if db.showBar then ShowDamageOnBar(plate, guid, hp, maxHP, total, remaining) end
+                    if db.showTimeToDeath and lethal then w.ttd:SetText(FormatTimeToDeath(TimeToDeath(guid, hp))) end
                     if guid == targetGUID then targetShown = true end
                 end
             end
@@ -350,6 +500,9 @@ local function Update()
         if remaining then
             if db.showText then fallbackText:SetText(FormatRemaining(remaining)) end
             if db.showSkull and lethal then fallbackSkull:Show() end
+            if db.showTimeToDeath and lethal then
+                fallbackTTD:SetText(FormatTimeToDeath(TimeToDeath(targetGUID, UnitHealth("target"))))
+            end
         end
     end
 end
@@ -416,7 +569,7 @@ local function OnCombatLog()
         local e = dots[destGUID][key]
         if not e then
             local duration = Duration()
-            e = { ticks = 0, mine = mine, total = math.max(1, math.floor(duration / info.interval + 0.5)) }
+            e = { ticks = 0, mine = mine, interval = info.interval, total = math.max(1, math.floor(duration / info.interval + 0.5)) }
             dots[destGUID][key] = e
             if mine or destGUID == UnitGUID("target") then HintIfNameplatesOff() end
         end
@@ -441,6 +594,9 @@ local OPTIONS = {
     { key = "showText",    label = "Show remaining HP after all DoTs" },
     { key = "showSkull",   label = "Show skull icon when DoTs are lethal" },
     { key = "showBar",     label = "Show DoT damage on health bar" },
+    { key = "showTicks",   label = "Show tick lines on the damage bar" },
+    { key = "showGlass",   label = "Glass effect on the damage bar" },
+    { key = "showTimeToDeath", label = "Show time to death next to the skull" },
     { key = "includeCrit", label = "Include expected crit damage (DoT crits)" },
     { key = "trackOthers", label = "Track DoTs of other players (summed up)" },
     { key = "onlyAttacked", label = "Track only enemies I attacked" },
@@ -453,10 +609,59 @@ local SLIDERS = {
     { key = "skullSize",   label = "Skull size",                                    min = 8,    max = 96 },
 }
 
+local COLORS = {
+    { key = "colorNonLethal", default = BAR_COLOR_NONLETHAL, label = "Bar color: enemy survives the DoTs" },
+    { key = "colorLethal",    default = BAR_COLOR_LETHAL,    label = "Bar color: DoTs are lethal" },
+    { key = "tickColor",   default = BAR_TICK_COLOR,   label = "Tick line color" },
+    { key = "edgeColor",   default = BAR_EDGE_COLOR,   label = "Left edge line color" },
+}
+
+-- Opens the game's color picker (with opacity) for DotTrackerDB[key]; onChanged runs on every change
+local function ChooseColor(key, onChanged)
+    local c = DotTrackerDB[key]
+    local prev = { c[1], c[2], c[3], c[4] }
+
+    local function Set(r, g, b, a)
+        DotTrackerDB[key] = { r, g, b, a }
+        onChanged()
+    end
+    local function Cancel()
+        Set(prev[1], prev[2], prev[3], prev[4])
+    end
+
+    if ColorPickerFrame.SetupColorPickerAndShow then
+        -- newer clients: opacity is the alpha value (1 = opaque)
+        local function Changed()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            Set(r, g, b, ColorPickerFrame:GetColorAlpha())
+        end
+        ColorPickerFrame:SetupColorPickerAndShow({
+            r = prev[1], g = prev[2], b = prev[3], opacity = prev[4], hasOpacity = true,
+            swatchFunc = Changed, opacityFunc = Changed, cancelFunc = Cancel,
+        })
+    else
+        -- older clients: the opacity slider counts the other way (0 = opaque)
+        local function Changed()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            Set(r, g, b, 1 - OpacitySliderFrame:GetValue())
+        end
+        ColorPickerFrame:Hide()
+        ColorPickerFrame.func = Changed
+        ColorPickerFrame.opacityFunc = Changed
+        ColorPickerFrame.cancelFunc = Cancel
+        ColorPickerFrame.hasOpacity = true
+        ColorPickerFrame.opacity = 1 - prev[4]
+        ColorPickerFrame.previousValues = prev
+        ColorPickerFrame:SetColorRGB(prev[1], prev[2], prev[3])
+        ColorPickerFrame:Show()
+    end
+end
+
 local function BuildOptionsPanel()
     local panel = CreateFrame("Frame", "DotTrackerOptions", UIParent,
         BackdropTemplateMixin and "BackdropTemplate" or nil)
-    panel:SetSize(360, 100 + #OPTIONS * 28 + #SLIDERS * 50)
+    -- top: 45 + checkboxes, sliders (25 + 50 each), color rows (28 each), bottom: two button rows (76) + margin
+    panel:SetSize(360, 180 + #OPTIONS * 28 + #SLIDERS * 50 + #COLORS * 28)
     panel:SetPoint("CENTER")
     panel:SetFrameStrata("DIALOG")
     panel:SetBackdrop({
@@ -480,9 +685,12 @@ local function BuildOptionsPanel()
     local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -4, -4)
 
+    local checks, sliders = {}, {}   -- by option key, refreshed by "Reset all"
+
     for i, opt in ipairs(OPTIONS) do
         local name = "DotTrackerCheck" .. i
         local cb = CreateFrame("CheckButton", name, panel, "UICheckButtonTemplate")
+        checks[opt.key] = cb
         cb:SetPoint("TOPLEFT", 24, -45 - (i - 1) * 28)
         _G[name .. "Text"]:SetText(opt.label)
         cb:SetChecked(DotTrackerDB[opt.key])
@@ -495,6 +703,7 @@ local function BuildOptionsPanel()
     for i, s in ipairs(SLIDERS) do
         local name = "DotTrackerSlider" .. i
         local sl = CreateFrame("Slider", name, panel, "OptionsSliderTemplate")
+        sliders[s.key] = sl
         sl:SetPoint("TOPLEFT", 30, -45 - #OPTIONS * 28 - 25 - (i - 1) * 50)
         sl:SetWidth(300)
         sl:SetMinMaxValues(s.min, s.max)
@@ -513,12 +722,87 @@ local function BuildOptionsPanel()
         end)
     end
 
+    -- color fields for the damage bar (click opens the color picker with opacity)
+    local swatchTextures = {}
+    local function RefreshSwatches()
+        for i, c in ipairs(COLORS) do
+            local v = DotTrackerDB[c.key]
+            swatchTextures[i]:SetColorTexture(v[1], v[2], v[3], 1)
+        end
+    end
+    for i, c in ipairs(COLORS) do
+        local sw = CreateFrame("Button", nil, panel)
+        sw:SetSize(22, 22)
+        sw:SetPoint("TOPLEFT", 30, -45 - #OPTIONS * 28 - 25 - #SLIDERS * 50 - 5 - (i - 1) * 28)
+        local border = sw:CreateTexture(nil, "BACKGROUND")
+        border:SetAllPoints()
+        border:SetColorTexture(1, 1, 1, 1)
+        local tex = sw:CreateTexture(nil, "ARTWORK")
+        tex:SetPoint("TOPLEFT", 2, -2)
+        tex:SetPoint("BOTTOMRIGHT", -2, 2)
+        swatchTextures[i] = tex
+        local label = sw:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+        label:SetPoint("LEFT", sw, "RIGHT", 8, 0)
+        label:SetText(c.label)
+        sw:SetScript("OnClick", function()
+            ChooseColor(c.key, function() RefreshSwatches(); Update() end)
+        end)
+    end
+    RefreshSwatches()
+
+    local resetBtn = CreateFrame("Button", "DotTrackerResetColorsButton", panel, "UIPanelButtonTemplate")
+    resetBtn:SetSize(150, 24)
+    resetBtn:SetPoint("BOTTOMRIGHT", -24, 22)
+    resetBtn:SetText("Reset colors")
+    resetBtn:SetScript("OnClick", function()
+        for _, c in ipairs(COLORS) do
+            DotTrackerDB[c.key] = { c.default[1], c.default[2], c.default[3], c.default[4] }
+        end
+        RefreshSwatches()
+        Update()
+    end)
+
     -- same as /dt test: fake DoTs on your target (removed after STALE_SECONDS)
     local testBtn = CreateFrame("Button", "DotTrackerTestButton", panel, "UIPanelButtonTemplate")
-    testBtn:SetSize(200, 24)
-    testBtn:SetPoint("BOTTOM", 0, 22)
-    testBtn:SetText("Test (fake DoTs on target)")
+    testBtn:SetSize(170, 24)
+    testBtn:SetPoint("BOTTOMLEFT", 24, 22)
+    testBtn:SetText("Test (fake DoTs)")
     testBtn:SetScript("OnClick", RunTest)
+
+    -- resets every setting (checkboxes, sliders, colors) to the defaults; the minimap button stays where it is
+    local function ResetAll()
+        for k, v in pairs(DEFAULTS) do
+            if k ~= "minimapAngle" then
+                DotTrackerDB[k] = type(v) == "table" and { v[1], v[2], v[3], v[4] } or v
+            end
+        end
+        for key, cb in pairs(checks) do cb:SetChecked(DotTrackerDB[key]) end
+        for key, sl in pairs(sliders) do sl:SetValue(DotTrackerDB[key]) end
+        RefreshSwatches()
+        ApplyLayout()
+        Update()
+    end
+
+    -- needs two clicks within 4 seconds, so a single misclick cannot wipe the settings
+    local resetAllBtn = CreateFrame("Button", "DotTrackerResetAllButton", panel, "UIPanelButtonTemplate")
+    resetAllBtn:SetSize(200, 24)
+    resetAllBtn:SetPoint("BOTTOM", 0, 52)
+    resetAllBtn:SetText("Reset all settings")
+    local armed = false
+    resetAllBtn:SetScript("OnClick", function(self)
+        if not armed then
+            armed = true
+            self:SetText("Click again to confirm")
+            C_Timer.After(4, function()
+                armed = false
+                self:SetText("Reset all settings")
+            end)
+            return
+        end
+        armed = false
+        self:SetText("Reset all settings")
+        ResetAll()
+    end)
 
     tinsert(UISpecialFrames, "DotTrackerOptions")   -- ESC closes the window
     return panel

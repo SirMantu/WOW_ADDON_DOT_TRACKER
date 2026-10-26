@@ -4,5 +4,6 @@
 .pkgmeta export-ignore
 .vscode export-ignore
 README.md export-ignore
+release.py export-ignore
 feature_screenshot.jpg export-ignore
 feature_screenshot.psd export-ignore

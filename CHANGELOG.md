@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.5
+
+### Added
+- **Two bar colors:** the DoT damage bar is purple while the enemy survives the DoTs and black when the DoTs are lethal (0 or less life left).
+- **Tick lines:** thin lines on the damage bar, one per tick still to come, in the order the ticks land.
+- **Glass effect:** a gradient (lighter at the top, darker at the bottom) gives the bar depth.
+- **Time to death:** when the DoTs are lethal, the seconds until the enemy dies are shown next to the skull, for example "6 s".
+- A bright line on the left edge of the bar marks where the enemy's life will end.
+- Options: checkboxes for tick lines, glass effect and time to death.
+- Four color fields in the options window (non-lethal bar color, lethal bar color, tick line color, edge line color). A click opens the game's color picker, including opacity. The colors are saved, and a "Reset colors" button restores the defaults.
+
+- "Reset all settings" button in the options window: restores all checkboxes, sliders and colors to their defaults. It needs a second click within 4 seconds to confirm. The minimap button position is kept.
+
+### Changed
+- The damage bar is no longer black. Colors and sizes can also be changed with the constants `BAR_COLOR_NONLETHAL`, `BAR_COLOR_LETHAL`, `BAR_TICK_COLOR`, `BAR_EDGE_COLOR`, `BAR_GLASS_TOP_ALPHA`, `BAR_GLASS_BOTTOM_ALPHA`, `BAR_MAX_TICKS` and `BAR_INSET`.
+
+### Fixed
+- The segment is now aligned exactly with the health bar. It took the width of the bar in the nameplate's scale but was drawn in the scale of the screen, so it was too wide or too narrow.
+- The segment no longer overlaps the border at the top and bottom of the health bar (`BAR_INSET`, 2 pixels).
+
 ## 1.0.4
 
 ### Added
