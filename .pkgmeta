@@ -4,6 +4,8 @@ manual-changelog:
   filename: CHANGELOG.md
   markup-type: markdown
 
+license-output: LICENSE
+
 ignore:
   - README.md
   - release.py

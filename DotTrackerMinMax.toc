@@ -2,7 +2,8 @@
 ## Title: DotTrackerMinMax
 ## Notes: Shows the remaining health of enemies after all damage over time effects (yours and other players')
 ## Author: Manuel Metzger
-## Version: 1.0.5
+## X-License: MIT
+## Version: 1.0.6
 ## X-Curse-Project-ID: 1765266
 ## SavedVariables: DotTrackerDB
 

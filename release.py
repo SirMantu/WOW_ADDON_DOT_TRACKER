@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 NAME = "DotTrackerMinMax"
-FILES = ["DotTrackerMinMax.lua", "DotTrackerMinMax.toc"]
+FILES = ["DotTrackerMinMax.lua", "DotTrackerMinMax.toc", "LICENSE"]
 
 root = Path(__file__).resolve().parent
 folder = root / NAME
