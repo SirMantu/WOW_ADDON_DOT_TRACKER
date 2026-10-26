@@ -524,6 +524,69 @@ local function BuildOptionsPanel()
     return panel
 end
 
+-- ===== Entry in the game menu (Escape -> Options -> AddOns) =====
+local function BuildAddonInfoPanel()
+    if not (Settings and Settings.RegisterCanvasLayoutCategory) then return end
+
+    local panel = CreateFrame("Frame")
+    panel.name = "DotTrackerMinMax"
+
+    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalHuge")
+    title:SetPoint("TOPLEFT", 16, -16)
+    title:SetText("DotTrackerMinMax")
+
+    local getMeta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+    local version = getMeta and getMeta(ADDON_NAME, "Version") or "?"
+
+    local info = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    info:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -12)
+    info:SetJustifyH("LEFT")
+    info:SetText("Shows the remaining health of an enemy after all damage over time effects.\n"
+        .. "Version: " .. version .. "\n"
+        .. "Author: Manuel Metzger\n\n"
+        .. "|cffffd100Slash commands:|r\n"
+        .. "|cffffffff/dt|r  -  open or close the options window\n"
+        .. "|cffffffff/dt test|r  -  add fake DoTs to your target for " .. STALE_SECONDS .. " seconds (preview)\n"
+        .. "|cffffffff/dt debug|r  -  print the combat log events the addon reacts to (toggle, for bug reports)")
+
+    -- links cannot be clicked in the game: show them in read-only boxes the player can copy
+    local function AddLink(label, url, anchor)
+        local fs = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        fs:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
+        fs:SetText(label)
+        local box = CreateFrame("EditBox", nil, panel, "InputBoxTemplate")
+        box:SetSize(380, 20)
+        box:SetPoint("TOPLEFT", fs, "BOTTOMLEFT", 6, -4)
+        box:SetAutoFocus(false)
+        box:SetFontObject("GameFontHighlight")
+        box:SetText(url)
+        box:SetCursorPosition(0)
+        -- read only: put the text back when edited, select everything on click for Ctrl+C
+        box:SetScript("OnTextChanged", function(self, userInput)
+            if userInput then self:SetText(url); self:HighlightText() end
+        end)
+        box:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+        box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+        return box
+    end
+    local github = AddLink("GitHub (source code, bug reports) - click, then Ctrl+C to copy:",
+        "https://github.com/SirMantu/WOW_ADDON_DOT_TRACKER", info)
+    local curse = AddLink("CurseForge (download):",
+        "https://www.curseforge.com/wow/addons/dottracker-minmax", github)
+
+    local btn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    btn:SetSize(160, 24)
+    btn:SetPoint("TOPLEFT", curse, "BOTTOMLEFT", -6, -20)
+    btn:SetText("Open options")
+    btn:SetScript("OnClick", function()
+        if HideUIPanel and SettingsPanel then HideUIPanel(SettingsPanel) end
+        ToggleOptions()
+    end)
+
+    local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
+    Settings.RegisterAddOnCategory(category)
+end
+
 -- ===== Minimap button (draggable around the minimap) =====
 local function BuildMinimapButton()
     local btn = CreateFrame("Button", "DotTrackerMinimapButton", Minimap)
@@ -601,6 +664,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
         playerGUID = UnitGUID("player")
         RegisterAll()
         optionsPanel = BuildOptionsPanel()
+        BuildAddonInfoPanel()
         BuildMinimapButton()
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
         OnCombatLog()

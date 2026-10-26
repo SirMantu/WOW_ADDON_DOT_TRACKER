@@ -1,8 +1,8 @@
 ## Interface: 11509
-## Title: DotTracker
-## Notes: Displays the remaining damage from DOTs on the target
+## Title: DotTrackerMinMax
+## Notes: Shows the remaining health of enemies after all damage over time effects (yours and other players')
 ## Author: Manuel Metzger
-## Version: 0.2
+## Version: 1.0.4
 ## SavedVariables: DotTrackerDB
 
 DotTrackerMinMax.lua

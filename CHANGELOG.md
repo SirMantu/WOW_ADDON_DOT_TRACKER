@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.4
+
+### Added
+- Entry "DotTrackerMinMax" in the game menu (Escape → Options → AddOns) with version, author, a list of all slash commands (`/dt`, `/dt test`, `/dt debug`), copyable links to GitHub and CurseForge and a button that opens the addon options.
+- The .toc now has the correct title, description and version.
+
 ## 1.0.3
 
 ### Fixed
