@@ -1,0 +1,8 @@
+# Files that are not part of the addon package (used by "git archive" for a local zip)
+.gitignore export-ignore
+.gitattributes export-ignore
+.pkgmeta export-ignore
+.vscode export-ignore
+README.md export-ignore
+feature_screenshot.jpg export-ignore
+feature_screenshot.psd export-ignore

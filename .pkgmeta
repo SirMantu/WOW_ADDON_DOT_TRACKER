@@ -1,0 +1,11 @@
+package-as: DotTrackerMinMax
+
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+ignore:
+  - README.md
+  - feature_screenshot.jpg
+  - feature_screenshot.psd
+  - .vscode
