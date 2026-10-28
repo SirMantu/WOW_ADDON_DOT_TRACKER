@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.7
+
+### Added
+- **Warning button:** while the enemy health bars (nameplates) are turned off, a red warning button appears at the bottom right of the screen (`WARNING_OFFSET_X`, `WARNING_OFFSET_Y`). Hovering it explains that DotTrackerMinMax will not work correctly without the health bars. A click turns them on again (it changes the game setting `nameplateShowEnemies`; not possible during combat) and removes the warning. A right-click opens the options. The button can be turned off with the option "Red warning button while enemy health bars are off" (Display tab) and is not shown when "Show on the enemy nameplates" is off.
+
 ## 1.0.6
 
 ### Added

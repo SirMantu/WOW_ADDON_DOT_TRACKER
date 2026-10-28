@@ -16,6 +16,7 @@ local BAR_FLASH_SECONDS = 0.1                     -- the part of the bar that a 
 local BAR_FLASH_COLOR = { 1, 1, 1, 1 }            -- color of that flash
 local TTD_COLOR = { 1, 0.125, 0.125, 1 }          -- color of the time to death: red, readable on the white skull
 local TTD_SIZE_FACTOR = 0.5                      -- font size of the time to death on the skull, relative to the skull size
+local WARNING_OFFSET_X, WARNING_OFFSET_Y = -96, 160   -- position of the warning button (from the bottom right corner of the screen)
 local BAR_INSET = 2                              -- pixels kept free at the top and bottom (health bar border)
 local BOLD_FONT = (GameFontNormalLarge:GetFont()) -- default font of your client
 local BOLD_SIZE = 20
@@ -51,6 +52,7 @@ local DEBUFF_COLORS = {
 
 local DEFAULTS = {
     showText = true,
+    warnNameplatesOff = true, -- red warning button while the enemy health bars (nameplates) are turned off
     useNameplates = true,  -- show text, skull and damage bar on the enemy nameplates (off = only the target display)
     showCurrentLife = true, -- text shows "current life -> life after the DoTs"
     showSkull = true,
@@ -165,6 +167,68 @@ fallbackBar:Hide()
 local fallbackTTD = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 fallbackTTD:SetFont(BOLD_FONT, math.floor(SKULL_SIZE * TTD_SIZE_FACTOR), "THICKOUTLINE")
 fallbackTTD:SetPoint("CENTER", fallbackSkull, "CENTER", 0, 0)
+
+-- ===== Warning button: the enemy health bars (nameplates) are turned off =====
+-- The addon draws on the enemy nameplates. While they are off, a red button appears at the bottom
+-- right of the screen. Hovering it explains the problem, a click turns the nameplates on again.
+local warningButton = CreateFrame("Button", "DotTrackerWarningButton", UIParent)
+warningButton:SetSize(36, 36)
+warningButton:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", WARNING_OFFSET_X, WARNING_OFFSET_Y)
+warningButton:SetFrameStrata("HIGH")
+warningButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+warningButton:Hide()
+
+local warningBackground = warningButton:CreateTexture(nil, "BACKGROUND")
+warningBackground:SetAllPoints()
+warningBackground:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+warningBackground:SetVertexColor(0.8, 0, 0, 1)
+local warningIcon = warningButton:CreateTexture(nil, "ARTWORK")
+warningIcon:SetPoint("TOPLEFT", 4, -4)
+warningIcon:SetPoint("BOTTOMRIGHT", -4, 4)
+warningIcon:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
+warningIcon:SetDesaturated(true)
+warningIcon:SetVertexColor(1, 0.25, 0.25)
+warningButton:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+local function NameplatesOff()
+    return GetCVar("nameplateShowEnemies") ~= "1"
+end
+
+local function UpdateWarning()
+    local db = DotTrackerDB
+    local show = db and db.warnNameplatesOff and db.useNameplates and NameplatesOff()
+    if show and not warningButton:IsShown() then
+        warningButton:Show()
+    elseif not show and warningButton:IsShown() then
+        warningButton:Hide()
+        if GameTooltip:GetOwner() == warningButton then GameTooltip:Hide() end
+    end
+end
+
+warningButton:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+    GameTooltip:AddLine("DotTrackerMinMax", 1, 0.25, 0.25)
+    GameTooltip:AddLine("The health bars (nameplates) of the enemies are turned off. "
+        .. "DotTrackerMinMax will not work correctly without them: the damage bar, the remaining "
+        .. "life and the skull cannot be shown on the enemies.", 1, 1, 1, true)
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine("Click: turn the enemy health bars on (this changes a game setting).", 0.4, 1, 0.4, true)
+    GameTooltip:AddLine("Right-click: open the DotTracker options.", 0.8, 0.8, 0.8, true)
+    GameTooltip:Show()
+end)
+warningButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+warningButton:SetScript("OnClick", function(self, mouseButton)
+    if mouseButton == "RightButton" then
+        ToggleOptions()
+        return
+    end
+    if InCombatLockdown() then
+        print("DotTracker: the enemy health bars cannot be turned on during combat.")
+        return
+    end
+    SetCVar("nameplateShowEnemies", 1)
+    UpdateWarning()
+end)
 
 -- ===== Text and skull on nameplates =====
 local plateWidgets = {}
@@ -600,6 +664,7 @@ end
 local function Update()
     if not DotTrackerDB then return end
     local db = DotTrackerDB
+    UpdateWarning()
 
     for _, w in pairs(plateWidgets) do
         w.fs:SetText("")
@@ -791,6 +856,7 @@ local TABS = { "Display", "Bar", "Colors", "Debuffs", "Layout", "Tracking" }
 local OPTIONS = {
     -- Display: what is shown next to the enemy
     { tab = 1, key = "useNameplates",   header = "Where", label = "Show on the enemy nameplates (off = target display only)" },
+    { tab = 1, key = "warnNameplatesOff", label = "Red warning button while enemy health bars are off" },
     { tab = 1, key = "showText",        header = "Text above the enemy", label = "Show remaining HP after all DoTs" },
     { tab = 1, key = "showCurrentLife", label = "Also show current life (current -> after DoTs)" },
     { tab = 1, key = "showSkull",       header = "Skull", label = "Show skull icon when DoTs are lethal" },
